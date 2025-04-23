@@ -58,6 +58,26 @@ interface PaymentResult {
   result: PaymentData;
 }
 
+// Interface for decoded payment request data
+interface DecodedPaymentRequest {
+  destination: string;
+  payment_hash: string;
+  num_satoshis: string;
+  timestamp: string;
+  expiry: string;
+  description: string;
+  description_hash: string;
+  fallback_addr: string;
+  cltv_expiry: string;
+  route_hints: unknown[];
+  payment_addr: string;
+  num_msat: string;
+  features: Record<string, unknown>;
+  currency?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
 /**
  * LightningSend Component
  * 
@@ -75,6 +95,8 @@ const LightningSend: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [rawResponse, setRawResponse] = useState<string>('');
+  const [decodedInvoice, setDecodedInvoice] = useState<DecodedPaymentRequest | null>(null);
+  const [decodingInvoice, setDecodingInvoice] = useState<boolean>(false);
 
   // Initialize the LND client
   const lnd = new LndClient({
@@ -181,6 +203,31 @@ const LightningSend: React.FC = () => {
   }, [rawResponse]);
 
   /**
+   * Decode a Lightning invoice
+   */
+  const decodeInvoice = async () => {
+    if (!paymentRequest || paymentRequest.trim() === '') {
+      setError('Please enter a valid lightning invoice');
+      return;
+    }
+
+    try {
+      setDecodingInvoice(true);
+      setError(null);
+      setDecodedInvoice(null);
+
+      // Use the decodePayReq method from FLNDR
+      const decodedResult = await lnd.decodePayReq(paymentRequest);
+
+      setDecodedInvoice(decodedResult as unknown as DecodedPaymentRequest);
+      setDecodingInvoice(false);
+    } catch {
+      setError('Failed to decode invoice. Please check if it is a valid lightning invoice.');
+      setDecodingInvoice(false);
+    }
+  };
+
+  /**
    * Send a Lightning payment
    */
   const sendPayment = async () => {
@@ -195,6 +242,7 @@ const LightningSend: React.FC = () => {
       setError(null);
       setPaymentResult(null);
       setRawResponse('');
+      setDecodedInvoice(null);
 
       // Send payment with non-streaming mode (default)
       const result = await lnd.sendPaymentV2({
@@ -217,6 +265,66 @@ const LightningSend: React.FC = () => {
     setPaymentResult(null);
     setError(null);
     setRawResponse('');
+    setDecodedInvoice(null);
+  };
+
+  /**
+   * Render the decoded invoice information
+   */
+  const renderDecodedInvoice = () => {
+    if (!decodedInvoice) return null;
+
+    return (
+      <div className="mt-4 bg-slate-50 p-4 rounded-md border border-slate-200">
+        <h3 className="font-medium text-slate-800 mb-2">Decoded Invoice</h3>
+        <div className="space-y-2 text-sm">
+          <div>
+            <div className="text-xs text-slate-500">Amount</div>
+            <div className="text-slate-800 font-medium">
+              {decodedInvoice.num_satoshis} sats
+            </div>
+          </div>
+          
+          <div>
+            <div className="text-xs text-slate-500">Description</div>
+            <div className="text-slate-800">
+              {decodedInvoice.description || "No description"}
+            </div>
+          </div>
+          
+          <div>
+            <div className="text-xs text-slate-500">Destination</div>
+            <div className="text-xs font-mono text-slate-800 break-all">
+              {decodedInvoice.destination}
+            </div>
+          </div>
+          
+          <div>
+            <div className="text-xs text-slate-500">Expires</div>
+            <div className="text-slate-800">
+              {new Date(parseInt(decodedInvoice.timestamp) * 1000 + parseInt(decodedInvoice.expiry) * 1000).toLocaleString()}
+            </div>
+          </div>
+        </div>
+        
+        <div className="mt-4 flex space-x-3">
+          <button
+            onClick={sendPayment}
+            disabled={loading}
+            className="flex-1 py-2 px-4 rounded-md text-white font-medium bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            Confirm & Send
+          </button>
+          
+          <button
+            onClick={() => setDecodedInvoice(null)}
+            className="flex-1 py-2 px-4 border border-slate-300 rounded-md text-slate-700 bg-white hover:bg-slate-50 focus:outline-none"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
   };
 
   /**
@@ -235,21 +343,39 @@ const LightningSend: React.FC = () => {
           className="w-full px-3 py-2 border border-slate-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
           rows={4}
           placeholder="lnbc..."
-          disabled={loading}
+          disabled={loading || decodingInvoice}
         />
       </div>
       
-      <button
-        onClick={sendPayment}
-        disabled={loading || !paymentRequest}
-        className={`w-full py-2 px-4 rounded-md text-white font-medium ${
-          loading || !paymentRequest 
-            ? 'bg-slate-400 cursor-not-allowed' 
-            : 'bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500'
-        }`}
-      >
-        {loading ? 'Sending...' : 'Send Payment'}
-      </button>
+      {!decodedInvoice && (
+        <div className="flex space-x-3">
+          <button
+            onClick={sendPayment}
+            disabled={loading || decodingInvoice || !paymentRequest}
+            className={`flex-1 py-2 px-4 rounded-md text-white font-medium ${
+              loading || decodingInvoice || !paymentRequest 
+                ? 'bg-slate-400 cursor-not-allowed' 
+                : 'bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500'
+            }`}
+          >
+            {loading ? 'Sending...' : 'Send Payment'}
+          </button>
+          
+          <button
+            onClick={decodeInvoice}
+            disabled={loading || decodingInvoice || !paymentRequest}
+            className={`flex-1 py-2 px-4 border rounded-md font-medium ${
+              loading || decodingInvoice || !paymentRequest 
+                ? 'border-slate-300 text-slate-400 cursor-not-allowed' 
+                : 'border-slate-300 text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500'
+            }`}
+          >
+            {decodingInvoice ? 'Decoding...' : 'Decode Invoice'}
+          </button>
+        </div>
+      )}
+      
+      {decodedInvoice && renderDecodedInvoice()}
       
       {loading && paymentResult?.result?.status === 'IN_FLIGHT' && (
         <div className="text-center text-sm text-slate-600">
