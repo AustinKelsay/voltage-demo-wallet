@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { LndClient } from 'flndr';
 import QRCode from './QRCode';
+import eventBus from '../utils/eventBus';
 
 // Types based on FLNDR API responses
 interface Invoice {
@@ -41,7 +42,7 @@ const LightningReceive: React.FC = () => {
       });
 
       // Transform the response to match our Invoice interface
-      setInvoice({
+      const formattedInvoice = {
         payment_request: newInvoice.payment_request,
         payment_hash: Buffer.from(newInvoice.r_hash).toString('hex'),
         value_msat: (amount * 1000) + '',
@@ -49,7 +50,12 @@ const LightningReceive: React.FC = () => {
         expiry: '3600',
         memo: memo || 'Lightning Payment',
         settled: false
-      });
+      };
+
+      setInvoice(formattedInvoice);
+
+      // Emit an event to notify other components that an invoice was created
+      eventBus.emit('invoice:created', formattedInvoice);
     } catch (err) {
       console.error('Error creating invoice:', err);
       setError('Failed to create invoice. Please check your node connection.');
@@ -65,12 +71,21 @@ const LightningReceive: React.FC = () => {
       setLoading(true);
       const updatedInvoice = await lnd.lookupInvoiceV2(invoice.payment_hash);
       
-      setInvoice({
-        ...invoice,
-        settled: updatedInvoice.settled
-      });
+      const wasSettledBefore = invoice.settled;
+      const isSettledNow = updatedInvoice.settled;
       
-      if (updatedInvoice.settled) {
+      // Update local state
+      const updatedInvoiceState = {
+        ...invoice,
+        settled: isSettledNow
+      };
+      
+      setInvoice(updatedInvoiceState);
+      
+      // If the invoice was just paid (status changed from unsettled to settled),
+      // emit a transaction event
+      if (!wasSettledBefore && isSettledNow) {
+        eventBus.emit('transaction:new', updatedInvoiceState);
         alert('Payment received!');
       }
     } catch (err) {

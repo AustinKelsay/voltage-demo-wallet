@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { LndClient } from 'flndr';
+import eventBus from '../utils/eventBus';
 
 // Types for the Lightning Network API response structures
 interface RouteHop {
@@ -180,6 +181,9 @@ const LightningSend: React.FC = () => {
         // Payment completed successfully
         setLoading(false);
         setError(null);
+        
+        // Emit an event to notify other components that a payment was sent
+        eventBus.emit('payment:sent', result);
         break;
       case 'FAILED':
         // Payment failed

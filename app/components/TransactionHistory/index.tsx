@@ -6,6 +6,7 @@ import { LndClient } from 'flndr';
 import TransactionTable from './TransactionTable';
 import TransactionFilters from './TransactionFilters';
 import TransactionDetail from './TransactionDetail';
+import eventBus from '../../utils/eventBus';
 import { 
   Transaction, 
   TransactionHistoryProps, 
@@ -99,6 +100,35 @@ const TransactionHistory: React.FC<TransactionHistoryProps> = ({ pageSize = 10 }
       setError('Failed to connect to Lightning Network. Please check your connection.');
     }
   }, []);
+
+  // Set up event listeners for manual transaction updates
+  useEffect(() => {
+    // Function to handle transaction events
+    const handleTransactionEvent = () => {
+      if (client) {
+        loadTransactions();
+      }
+    };
+
+    // Subscribe to all transaction-related events
+    eventBus.on('transaction:new', handleTransactionEvent);
+    eventBus.on('invoice:created', handleTransactionEvent);
+    eventBus.on('payment:sent', handleTransactionEvent);
+
+    // Clean up event listeners on unmount
+    return () => {
+      eventBus.off('transaction:new', handleTransactionEvent);
+      eventBus.off('invoice:created', handleTransactionEvent);
+      eventBus.off('payment:sent', handleTransactionEvent);
+    };
+  }, [client]);
+
+  // Load transactions when component mounts
+  useEffect(() => {
+    if (client) {
+      loadTransactions();
+    }
+  }, [client]);
 
   /**
    * Format a timestamp to a readable date string
@@ -364,13 +394,6 @@ const TransactionHistory: React.FC<TransactionHistoryProps> = ({ pageSize = 10 }
       return 'Unable to decode';
     }
   };
-
-  // Load transactions when client is initialized - separate from the WebSocket setup
-  useEffect(() => {
-    if (client) {
-      loadTransactions();
-    }
-  }, [client]);
 
   // Get transactions for the current page
   const getPaginatedTransactions = (): Transaction[] => {
