@@ -1,5 +1,5 @@
-import LightningReceive from "../app/components/LightningReceive";
-import LightningSend from "../app/components/LightningSend";
+import LightningReceive from "./components/LightningReceive";
+import LightningSend from "./components/LightningSend";
 
 export default function Home() {
   return (
