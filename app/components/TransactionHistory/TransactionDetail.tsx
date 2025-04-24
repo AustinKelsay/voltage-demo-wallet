@@ -42,11 +42,9 @@ const TransactionDetail: React.FC<TransactionDetailProps> = ({
               <h4 className="font-medium text-gray-700 mb-1">Amount</h4>
               <p className="text-2xl font-bold mb-4">
                 {tx.type === 'received' ? '+' : '-'}{tx.amount.toLocaleString()} sats
-                {tx.fee && tx.fee > 0 && (
                   <span className="text-sm text-gray-500 ml-2">
-                    + {tx.fee.toLocaleString()} sats fee
+                    + {tx.fee?.toLocaleString()} sats fee
                   </span>
-                )}
               </p>
               
               <h4 className="font-medium text-gray-700 mb-1">Status</h4>
@@ -71,7 +69,7 @@ const TransactionDetail: React.FC<TransactionDetailProps> = ({
             </div>
             
             <div>
-              <h4 className="font-medium text-gray-700 mb-1">ID</h4>
+              <h4 className="font-medium text-gray-700 mb-1">Payment Hash</h4>
               <div className="bg-gray-100 p-2 rounded-md mb-4 break-all text-xs">
                 {tx.id}
               </div>

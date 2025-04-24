@@ -108,11 +108,9 @@ const TransactionTable: React.FC<TransactionTableProps> = ({
                   <span className="font-medium">
                     {tx.type === 'received' ? '+' : '-'}{tx.amount.toLocaleString()} sats
                   </span>
-                  {tx.fee && tx.fee > 0 && (
-                    <span className="block text-xs text-gray-500">
-                      Fee: {tx.fee.toLocaleString()} sats
-                    </span>
-                  )}
+                  <span className="block text-xs text-gray-500">
+                    Fee: {tx?.fee} sats
+                  </span>
                 </td>
                 <td className="px-6 py-4">
                   <div className="text-sm text-gray-900 truncate max-w-xs">
