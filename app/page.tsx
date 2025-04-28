@@ -1,6 +1,6 @@
 import LightningReceive from "./components/LightningReceive";
 import LightningSend from "./components/LightningSend";
-import TransactionHistory from "./components/TransactionHistory/index";
+import TransactionHistory from "./components/TransactionHistory";
 
 export default function Home() {
   return (
@@ -18,7 +18,7 @@ export default function Home() {
         </div>
         
         <div className="mb-12">
-          <TransactionHistory pageSize={5} />
+          <TransactionHistory />
         </div>
       </div>
     </main>
