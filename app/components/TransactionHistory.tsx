@@ -1,553 +1,448 @@
 "use client"
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { LndClient, Transaction, TransactionType, TransactionStatus, ListTransactionHistoryResponse } from 'flndr';
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { LndClient, Transaction, TransactionType, TransactionStatus } from 'flndr';
-
-interface TransactionHistoryProps {
-  pageSize?: number;
-  initialTypes?: TransactionType[];
-  initialStatuses?: TransactionStatus[];
-  initialFetchLimit?: number;
+// Define filter state type
+interface FilterState {
+  types: TransactionType[] | null;
+  statuses: TransactionStatus[] | null;
+  startDate: string | null;
+  endDate: string | null;
 }
 
-interface TransactionHistoryFilters {
-  limit: number;
+// Interface for pagination state to include cursors
+interface PaginationState {
   offset: number;
-  types?: TransactionType[];
-  statuses?: TransactionStatus[];
-  creation_date_start?: string;
-  creation_date_end?: string;
+  limit: number;
+  payment_cursor?: string;
+  invoice_cursor?: string;
 }
 
-const TransactionHistory: React.FC<TransactionHistoryProps> = ({
-  pageSize = 25,
-  initialTypes,
-  initialStatuses,
-  initialFetchLimit = 1000,
-}) => {
-  // State for transactions and pagination
-  const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
-  const [displayedTransactions, setDisplayedTransactions] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
-  const [totalCount, setTotalCount] = useState(0);
-  const [fetchLimit, setFetchLimit] = useState(initialFetchLimit);
-  
-  // Filter state
-  const [selectedTypes, setSelectedTypes] = useState<TransactionType[]>(initialTypes || []);
-  const [selectedStatuses, setSelectedStatuses] = useState<TransactionStatus[]>(initialStatuses || []);
-  const [dateRange, setDateRange] = useState<{start?: string, end?: string}>({});
-
-  // Initialize the LND client with useMemo
-  const lnd = useMemo(() => new LndClient({
+const TransactionHistory: React.FC = () => {
+  // Initialize the LND client
+  const lndClient = useMemo(() => new LndClient({
     baseUrl: process.env.NEXT_PUBLIC_LND_REST_API_URL || 'https://your-lnd-proxy:8080',
     macaroon: process.env.NEXT_PUBLIC_LND_MACAROON || '',
   }), []);
+
+  // State for transactions and pagination
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [transactionData, setTransactionData] = useState<ListTransactionHistoryResponse | null>(null);
   
-  // Format date to readable format
-  const formatDate = (timestamp: number): string => {
-    return new Date(timestamp * 1000).toLocaleString();
-  };
+  // State for filters
+  const [filters, setFilters] = useState<FilterState>({
+    types: null,
+    statuses: null,
+    startDate: null,
+    endDate: null
+  });
   
-  // Format amount in sats to more readable format
-  const formatAmount = (amount: number): string => {
-    return new Intl.NumberFormat().format(amount) + ' sats';
-  };
-  
-  // Load ALL transactions with current filters
-  const loadAllTransactions = useCallback(async () => {
+  // Pagination state with cursors
+  const [pagination, setPagination] = useState<PaginationState>({
+    offset: 0,
+    limit: 10,
+  });
+
+  // Build request options from filters and pagination
+  const buildRequestOptions = useCallback(() => {
+    return {
+      offset: pagination.offset,
+      limit: pagination.limit,
+      payment_cursor: pagination.payment_cursor,
+      invoice_cursor: pagination.invoice_cursor,
+      types: filters.types || undefined,
+      statuses: filters.statuses || undefined,
+      creation_date_start: filters.startDate ? Math.floor(new Date(filters.startDate).getTime() / 1000).toString() : undefined,
+      creation_date_end: filters.endDate ? Math.floor(new Date(filters.endDate).getTime() / 1000).toString() : undefined,
+    };
+  }, [filters, pagination]);
+
+  // Function to fetch transactions with cursor-based pagination
+  const fetchTransactions = useCallback(async (resetPagination = false) => {
     try {
       setLoading(true);
       setError(null);
       
-      // Create filters for LND client
-      const filters: TransactionHistoryFilters = {
-        limit: fetchLimit, // Use the user-configurable limit
-        offset: 0
+      // Create new pagination state based on whether we're resetting or continuing
+      const paginationState = resetPagination ? 
+        { offset: 0, limit: pagination.limit } : 
+        pagination;
+      
+      // Update pagination state if we're resetting
+      if (resetPagination) {
+        setPagination(paginationState);
+      }
+      
+      // Build request options
+      const requestOptions = {
+        ...buildRequestOptions(),
+        ...(resetPagination ? { offset: 0, payment_cursor: undefined, invoice_cursor: undefined } : {})
       };
+
+      const response = await lndClient.listTransactionHistory(requestOptions);
       
-      // Apply filters if set
-      if (selectedTypes.length > 0) {
-        filters.types = selectedTypes;
+      // Update the transaction data
+      setTransactionData(prev => {
+        // If resetting pagination or first load, replace the data
+        if (resetPagination || !prev) {
+          return response;
+        }
+        
+        // Otherwise, append the new transactions to the existing ones
+        return {
+          ...response,
+          transactions: [...prev.transactions, ...response.transactions],
+          // Keep the new pagination metadata
+          offset: response.offset,
+          limit: response.limit,
+          has_more: response.has_more,
+          total_count: response.total_count,
+          next_cursor: response.next_cursor
+        };
+      });
+      
+      // Store cursors for next page if available
+      if (response.next_cursor) {
+        setPagination({
+          offset: response.next_cursor.offset,
+          limit: response.next_cursor.limit,
+          payment_cursor: response.next_cursor.payment_cursor ?? undefined,
+          invoice_cursor: response.next_cursor.invoice_cursor ?? undefined
+        });
       }
-      
-      if (selectedStatuses.length > 0) {
-        filters.statuses = selectedStatuses;
-      }
-      
-      if (dateRange.start) {
-        filters.creation_date_start = dateRange.start;
-      }
-      
-      if (dateRange.end) {
-        filters.creation_date_end = dateRange.end;
-      }
-      
-      // Instead of relying on the pagination from the API, we'll fetch a large batch
-      // and handle pagination on the client side
-      const fetchResult = await lnd.listTransactionHistory(filters);
-      
-      // Store all transactions
-      setAllTransactions(fetchResult.transactions);
-      setTotalCount(fetchResult.transactions.length);
-      
-      // Calculate total pages
-      const pages = Math.ceil(fetchResult.transactions.length / pageSize);
-      setTotalPages(pages > 0 ? pages : 1);
-      
-      // Set current page to 1 when filtering
-      setCurrentPage(1);
-      
-      // Display the first page of transactions
-      updateDisplayedTransactions(fetchResult.transactions, 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load transactions');
-      console.error('Error loading transactions:', err);
+      console.error('Transaction fetch error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch transactions');
     } finally {
       setLoading(false);
     }
-  }, [lnd, pageSize, selectedTypes, selectedStatuses, dateRange, fetchLimit]);
-  
-  // Update displayed transactions based on current page
-  const updateDisplayedTransactions = (transactions: Transaction[], page: number) => {
-    const startIndex = (page - 1) * pageSize;
-    const endIndex = startIndex + pageSize;
-    setDisplayedTransactions(transactions.slice(startIndex, endIndex));
-  };
-  
-  // Initial data load
+  }, [lndClient, pagination, buildRequestOptions]);
+
+  // Initial load
   useEffect(() => {
-    loadAllTransactions();
-  }, [loadAllTransactions]);
-  
-  // Handle page navigation
-  const goToPage = (page: number) => {
-    if (page >= 1 && page <= totalPages && !loading) {
-      setCurrentPage(page);
-      updateDisplayedTransactions(allTransactions, page);
-    }
-  };
-  
-  // Handle filter changes
-  const handleTypeChange = (type: TransactionType) => {
-    setSelectedTypes(prev => 
-      prev.includes(type) 
-        ? prev.filter(t => t !== type) 
-        : [...prev, type]
-    );
-  };
-  
-  const handleStatusChange = (status: TransactionStatus) => {
-    setSelectedStatuses(prev => 
-      prev.includes(status) 
-        ? prev.filter(s => s !== status) 
-        : [...prev, status]
-    );
+    fetchTransactions(true);
+  }, [fetchTransactions]);
+
+  // Format amount with sats unit
+  const formatAmount = (amount: number): string => {
+    return `${amount.toLocaleString()} sats`;
   };
 
-  // Handle fetch limit change
-  const handleFetchLimitChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    setFetchLimit(Number(e.target.value));
-  };
-  
-  // Apply filters
-  const applyFilters = () => {
-    loadAllTransactions();
-  };
-  
-  // Reset filters
-  const resetFilters = () => {
-    setSelectedTypes([]);
-    setSelectedStatuses([]);
-    setDateRange({});
-    // Will trigger useEffect due to dependency changes
-  };
-  
-  // Get appropriate status badge styling
-  const getStatusBadgeClass = (status: TransactionStatus): string => {
-    switch (status) {
-      case 'succeeded':
-      case 'settled':
-        return 'bg-green-100 text-green-800';
-      case 'failed':
-      case 'canceled':
-      case 'expired':
-        return 'bg-red-100 text-red-800';
-      case 'in_flight':
-      case 'pending':
-      case 'accepted':
-        return 'bg-yellow-100 text-yellow-800';
-      default:
-        return 'bg-gray-100 text-gray-800';
-    }
-  };
-  
-  // Get appropriate type badge styling
-  const getTypeBadgeClass = (type: TransactionType): string => {
-    return type === 'received' 
-      ? 'bg-blue-100 text-blue-800' 
-      : 'bg-purple-100 text-purple-800';
+  // Format timestamp to human-readable date/time
+  const formatDate = (timestamp: number): string => {
+    return new Date(timestamp * 1000).toLocaleString();
   };
 
-  // Generate pagination buttons
-  const renderPagination = () => {
-    const pages = [];
-    const maxButtons = 5; // Maximum number of page buttons to show
+  // Get transaction status label and color
+  const getStatusInfo = useMemo(() => {
+    const statusMap: Record<TransactionStatus, { label: string; color: string }> = {
+      'succeeded': { label: 'Sent Successfully', color: 'text-green-600' },
+      'failed': { label: 'Failed', color: 'text-red-600' },
+      'in_flight': { label: 'In Progress', color: 'text-yellow-600' },
+      'pending': { label: 'Pending', color: 'text-yellow-600' },
+      'settled': { label: 'Received', color: 'text-green-600' },
+      'accepted': { label: 'Accepted', color: 'text-blue-600' },
+      'canceled': { label: 'Canceled', color: 'text-red-600' },
+      'expired': { label: 'Expired', color: 'text-gray-600' }
+    };
     
-    let startPage = Math.max(1, currentPage - Math.floor(maxButtons / 2));
-    const endPage = Math.min(totalPages, startPage + maxButtons - 1);
-    
-    if (endPage - startPage + 1 < maxButtons) {
-      startPage = Math.max(1, endPage - maxButtons + 1);
-    }
-    
-    // Previous button
-    pages.push(
-      <button
-        key="prev"
-        onClick={() => goToPage(currentPage - 1)}
-        disabled={currentPage === 1 || loading}
-        className="px-3 py-1 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-      >
-        Previous
-      </button>
-    );
-    
-    // Page 1
-    if (startPage > 1) {
-      pages.push(
-        <button
-          key={1}
-          onClick={() => goToPage(1)}
-          className="px-3 py-1 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50"
-        >
-          1
-        </button>
-      );
-      
-      // Ellipsis if needed
-      if (startPage > 2) {
-        pages.push(
-          <span key="ellipsis1" className="px-2 py-1">
-            ...
-          </span>
-        );
-      }
-    }
-    
-    // Page buttons
-    for (let i = startPage; i <= endPage; i++) {
-      pages.push(
-        <button
-          key={i}
-          onClick={() => goToPage(i)}
-          className={`px-3 py-1 rounded-md border ${
-            currentPage === i
-              ? 'bg-blue-600 text-white border-blue-600'
-              : 'border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50'
-          }`}
-        >
-          {i}
-        </button>
-      );
-    }
-    
-    // Ellipsis if needed
-    if (endPage < totalPages - 1) {
-      pages.push(
-        <span key="ellipsis2" className="px-2 py-1">
-          ...
-        </span>
-      );
-    }
-    
-    // Last page button if not included
-    if (endPage < totalPages) {
-      pages.push(
-        <button
-          key={totalPages}
-          onClick={() => goToPage(totalPages)}
-          className="px-3 py-1 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50"
-        >
-          {totalPages}
-        </button>
-      );
-    }
-    
-    // Next button
-    pages.push(
-      <button
-        key="next"
-        onClick={() => goToPage(currentPage + 1)}
-        disabled={currentPage === totalPages || loading}
-        className="px-3 py-1 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-      >
-        Next
-      </button>
-    );
-    
-    return pages;
+    return (status: TransactionStatus) => statusMap[status] || { label: status, color: 'text-gray-600' };
+  }, []);
+
+  // Handler for filter changes
+  const handleFilterChange = (filterType: keyof FilterState, value: TransactionType[] | TransactionStatus[] | string | null) => {
+    setFilters(prev => ({
+      ...prev,
+      [filterType]: value
+    }));
   };
 
-  // Render skeleton loader for transaction rows
-  const renderSkeletonRows = () => {
-    const skeletonRows = [];
-    for (let i = 0; i < pageSize; i++) {
-      skeletonRows.push(
-        <tr key={`skeleton-${i}`} className="animate-pulse">
-          <td className="px-6 py-4 whitespace-nowrap">
-            <div className="h-4 bg-gray-200 rounded w-24"></div>
-          </td>
-          <td className="px-6 py-4 whitespace-nowrap">
-            <div className="h-6 bg-gray-200 rounded w-16"></div>
-          </td>
-          <td className="px-6 py-4 whitespace-nowrap">
-            <div className="h-4 bg-gray-200 rounded w-20"></div>
-          </td>
-          <td className="px-6 py-4 whitespace-nowrap">
-            <div className="h-6 bg-gray-200 rounded w-16"></div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 bg-gray-200 rounded w-32"></div>
-          </td>
-        </tr>
-      );
+  // Apply filters and refresh data
+  const applyFilters = useCallback(() => {
+    fetchTransactions(true);
+  }, [fetchTransactions]);
+
+  // Reset all filters
+  const resetFilters = useCallback(() => {
+    setFilters({
+      types: null,
+      statuses: null,
+      startDate: null,
+      endDate: null
+    });
+    fetchTransactions(true);
+  }, [fetchTransactions]);
+
+  // Handle pagination - load more pattern for cursor-based pagination
+  const loadMore = useCallback(() => {
+    if (transactionData?.has_more) {
+      fetchTransactions(false);
     }
-    return skeletonRows;
-  };
-  
+  }, [transactionData, fetchTransactions]);
+
+  // Handle changing page size
+  const handlePageSizeChange = useCallback((newPageSize: number) => {
+    setPagination(prev => ({
+      ...prev,
+      offset: 0,
+      limit: newPageSize,
+      payment_cursor: undefined,
+      invoice_cursor: undefined
+    }));
+    fetchTransactions(true);
+  }, [fetchTransactions]);
+
+  // Available transaction types for filter
+  const availableTypes = useMemo(() => [
+    { value: 'sent' as TransactionType, label: 'Sent Payments' },
+    { value: 'received' as TransactionType, label: 'Received Payments' }
+  ], []);
+
+  // Available transaction statuses for filter
+  const availableStatuses = useMemo(() => [
+    { value: 'succeeded' as TransactionStatus, label: 'Succeeded' },
+    { value: 'failed' as TransactionStatus, label: 'Failed' },
+    { value: 'in_flight' as TransactionStatus, label: 'In Flight' },
+    { value: 'pending' as TransactionStatus, label: 'Pending' },
+    { value: 'settled' as TransactionStatus, label: 'Settled' },
+    { value: 'accepted' as TransactionStatus, label: 'Accepted' },
+    { value: 'canceled' as TransactionStatus, label: 'Canceled' },
+    { value: 'expired' as TransactionStatus, label: 'Expired' }
+  ], []);
+
   return (
-    <div className="space-y-6">
-      {/* Filters Panel */}
-      <div className="bg-white rounded-lg shadow p-4">
-        <h2 className="text-lg font-medium mb-4">Filters</h2>
-        
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          {/* Transaction Types */}
+    <div className="container mx-auto p-4">
+      <h1 className="text-2xl font-bold mb-6">Lightning Transaction History</h1>
+      
+      {/* Filters */}
+      <div className="bg-gray-100 p-4 rounded-lg mb-6">
+        <h2 className="text-lg font-semibold mb-2">Filters</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* Transaction Type Filter */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
               Transaction Type
             </label>
-            <div className="space-y-2">
-              {(['sent', 'received'] as TransactionType[]).map(type => (
-                <label key={type} className="flex items-center">
-                  <input
-                    type="checkbox"
-                    checked={selectedTypes.includes(type)}
-                    onChange={() => handleTypeChange(type)}
-                    className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4"
-                  />
-                  <span className="ml-2 text-sm">{type.charAt(0).toUpperCase() + type.slice(1)}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-          
-          {/* Transaction Statuses */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Status
-            </label>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-              {([
-                'succeeded', 'settled', 'failed', 'pending', 
-                'in_flight', 'accepted', 'canceled', 'expired'
-              ] as TransactionStatus[]).map(status => (
-                <label key={status} className="flex items-center">
-                  <input
-                    type="checkbox"
-                    checked={selectedStatuses.includes(status)}
-                    onChange={() => handleStatusChange(status)}
-                    className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4"
-                  />
-                  <span className="ml-2 text-sm">{status.charAt(0).toUpperCase() + status.slice(1).replace('_', ' ')}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-          
-          {/* Fetch Limit Control */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Fetch Limit
-            </label>
             <select
-              value={fetchLimit}
-              onChange={handleFetchLimitChange}
-              className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
+              className="w-full p-2 border border-gray-300 rounded-md"
+              value={filters.types ? filters.types[0] : ''}
+              onChange={e => handleFilterChange('types', e.target.value ? [e.target.value as TransactionType] : null)}
             >
-              <option value={100}>100 transactions</option>
-              <option value={250}>250 transactions</option>
-              <option value={500}>500 transactions</option>
-              <option value={1000}>1,000 transactions</option>
-              <option value={2000}>2,000 transactions</option>
-              <option value={5000}>5,000 transactions</option>
-              <option value={10000}>10,000 transactions</option>
-              <option value={20000}>20,000 transactions</option>
-              <option value={50000}>50,000 transactions</option>
-              <option value={100000}>100,000 transactions</option>
-              <option value={200000}>200,000 transactions</option>
-              <option value={500000}>500,000 transactions</option>
-              <option value={1000000}>1,000,000 transactions</option>
+              <option value="">All Types</option>
+              {availableTypes.map(type => (
+                <option key={type.value} value={type.value}>
+                  {type.label}
+                </option>
+              ))}
             </select>
           </div>
           
-          {/* Filter Actions */}
-          <div className="flex flex-col justify-end">
-            <div className="space-y-2">
-              <button
-                onClick={applyFilters}
-                disabled={loading}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center"
-              >
-                {loading ? (
-                  <>
-                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    Loading...
-                  </>
-                ) : (
-                  'Apply Filters'
-                )}
-              </button>
-              <button
-                onClick={resetFilters}
-                disabled={loading}
-                className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Reset Filters
-              </button>
-            </div>
+          {/* Status Filter */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Status
+            </label>
+            <select
+              className="w-full p-2 border border-gray-300 rounded-md"
+              value={filters.statuses ? filters.statuses[0] : ''}
+              onChange={e => handleFilterChange('statuses', e.target.value ? [e.target.value as TransactionStatus] : null)}
+            >
+              <option value="">All Statuses</option>
+              {availableStatuses.map(status => (
+                <option key={status.value} value={status.value}>
+                  {status.label}
+                </option>
+              ))}
+            </select>
           </div>
+          
+          {/* Date Range Filters */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Start Date
+            </label>
+            <input
+              type="date"
+              className="w-full p-2 border border-gray-300 rounded-md"
+              value={filters.startDate || ''}
+              onChange={e => handleFilterChange('startDate', e.target.value || null)}
+            />
+          </div>
+          
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              End Date
+            </label>
+            <input
+              type="date"
+              className="w-full p-2 border border-gray-300 rounded-md"
+              value={filters.endDate || ''}
+              onChange={e => handleFilterChange('endDate', e.target.value || null)}
+            />
+          </div>
+        </div>
+        
+        <div className="mt-4 flex space-x-2">
+          <button
+            className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 transition"
+            onClick={applyFilters}
+          >
+            Apply Filters
+          </button>
+          <button
+            className="bg-gray-300 text-gray-800 px-4 py-2 rounded-md hover:bg-gray-400 transition"
+            onClick={resetFilters}
+          >
+            Reset
+          </button>
         </div>
       </div>
       
-      {/* Transaction List */}
-      <div className="bg-white rounded-lg shadow overflow-hidden">
-        <div className="px-4 py-5 sm:px-6 border-b border-gray-200">
-          <h3 className="text-lg leading-6 font-medium text-gray-900 flex items-center">
-            Transaction History
-            {loading && (
-              <span className="ml-2 inline-flex items-center">
-                <svg className="animate-spin h-4 w-4 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-              </span>
-            )}
-          </h3>
-          <p className="mt-1 text-sm text-gray-500">
-            {loading 
-              ? `Loading up to ${fetchLimit} transactions...` 
-              : `Showing ${(currentPage - 1) * pageSize + 1} to ${Math.min(currentPage * pageSize, totalCount)} of ${totalCount} transactions`}
-          </p>
+      {/* Error Message */}
+      {error && (
+        <div className="bg-red-100 text-red-700 p-4 rounded-md mb-6">
+          {error}
         </div>
-        
-        {error && (
-          <div className="p-4 bg-red-50 text-red-700 border-b border-red-200">
-            <p className="font-medium">Error loading transactions</p>
-            <p className="text-sm">{error}</p>
-          </div>
-        )}
-        
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+      )}
+      
+      {/* Page Size Selector */}
+      <div className="flex justify-end mb-4">
+        <div className="flex items-center space-x-2">
+          <label className="text-sm text-gray-700">Items per page:</label>
+          <select
+            value={pagination.limit}
+            onChange={e => handlePageSizeChange(Number(e.target.value))}
+            className="p-1 border border-gray-300 rounded text-sm"
+          >
+            <option value={5}>5</option>
+            <option value={10}>10</option>
+            <option value={25}>25</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
+        </div>
+      </div>
+      
+      {/* Transactions Table */}
+      <div className="bg-white shadow-md rounded-lg overflow-hidden mb-6">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Type
+              </th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Date
+              </th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Amount
+              </th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Status
+              </th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Description
+              </th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {loading && !transactionData && (
               <tr>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Date
-                </th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Type
-                </th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Amount
-                </th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Status
-                </th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Description
-                </th>
+                <td colSpan={5} className="px-6 py-4 whitespace-nowrap text-center text-gray-500">
+                  Loading transactions...
+                </td>
               </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {loading ? (
-                // Skeleton loader while loading
-                renderSkeletonRows()
-              ) : displayedTransactions.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="px-6 py-4 text-center text-sm text-gray-500">
-                    No transactions found
+            )}
+            
+            {!loading && (!transactionData || transactionData.transactions.length === 0) && (
+              <tr>
+                <td colSpan={5} className="px-6 py-4 whitespace-nowrap text-center text-gray-500">
+                  No transactions found
+                </td>
+              </tr>
+            )}
+            
+            {transactionData && transactionData.transactions.map((tx: Transaction) => {
+              const statusInfo = getStatusInfo(tx.status);
+              
+              return (
+                <tr key={tx.id} className="hover:bg-gray-50">
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <div className="flex items-center">
+                      <span className={`font-medium ${tx.type === 'sent' ? 'text-orange-600' : 'text-green-600'}`}>
+                        {tx.type === 'sent' ? '↗️ Sent' : '↘️ Received'}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    {formatDate(tx.timestamp)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <div className="text-sm font-medium text-gray-900">
+                      {formatAmount(tx.amount)}
+                    </div>
+                    {tx.fee > 0 && (
+                      <div className="text-xs text-gray-500">
+                        Fee: {formatAmount(tx.fee)}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <span className={`inline-flex text-xs leading-5 font-semibold rounded-full px-2 py-1 bg-opacity-10 ${statusInfo.color} bg-${statusInfo.color.split('-')[1]}-100`}>
+                      {statusInfo.label}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 max-w-xs truncate">
+                    {tx.description || 'No description'}
                   </td>
                 </tr>
-              ) : (
-                displayedTransactions.map((tx, index) => (
-                  <tr key={`${tx.id}-${index}-${tx.timestamp}`} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                      {formatDate(tx.timestamp)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${getTypeBadgeClass(tx.type)}`}>
-                        {tx.type.charAt(0).toUpperCase() + tx.type.slice(1)}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                      <span className={tx.type === 'received' ? 'text-green-600' : 'text-red-600'}>
-                        {tx.type === 'received' ? '+' : '-'}{formatAmount(tx.amount)}
-                      </span>
-                      {tx.fee > 0 && (
-                        <span className="block text-xs text-gray-500">
-                          Fee: {formatAmount(tx.fee)}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusBadgeClass(tx.status)}`}>
-                        {tx.status.charAt(0).toUpperCase() + tx.status.slice(1).replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-600 max-w-xs truncate">
-                      {tx.description || 'No description'}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-        
-        {/* Loading indicator for bottom of table */}
-        {loading && (
-          <div className="flex justify-center items-center py-6 border-t border-gray-200">
-            <div className="flex items-center space-x-2 text-blue-600">
-              <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              <span>Loading transactions...</span>
-            </div>
-          </div>
-        )}
-        
-        {/* Pagination Controls */}
-        {totalPages > 1 && !loading && (
-          <div className="px-6 py-4 border-t border-gray-200 flex justify-center space-x-2">
-            {renderPagination()}
-          </div>
-        )}
-        
-        {/* Page Info - show even when only one page */}
-        {!loading && (
-          <div className="px-6 py-2 border-t border-gray-200 text-center text-sm text-gray-600">
-            Page {currentPage} of {totalPages || 1}
-          </div>
-        )}
+              );
+            })}
+          </tbody>
+        </table>
       </div>
+      
+      {/* Loading indicator for pagination */}
+      {loading && transactionData && (
+        <div className="text-center my-4">
+          <div className="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-600"></div>
+          <p className="mt-2 text-gray-600">Loading more transactions...</p>
+        </div>
+      )}
+      
+      {/* Pagination - Using a "Load More" pattern which works better with cursor-based pagination */}
+      {transactionData && (
+        <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="text-sm text-gray-700">
+            {transactionData.transactions.length > 0 ? (
+              <>
+                Showing <span className="font-medium">{transactionData.offset + 1}</span> to <span className="font-medium">
+                  {transactionData.offset + transactionData.transactions.length}
+                </span> of approximately <span className="font-medium">{transactionData.total_count}</span> transactions
+              </>
+            ) : (
+              'No transactions found'
+            )}
+          </div>
+          
+          {transactionData.has_more && (
+            <button
+              onClick={loadMore}
+              disabled={loading}
+              className={`px-4 py-2 rounded-md ${loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'} text-white transition`}
+            >
+              Load More
+            </button>
+          )}
+          
+          {!transactionData.has_more && transactionData.transactions.length > 0 && (
+            <div className="text-sm text-gray-600">
+              You&apos;ve reached the end of the list
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };
