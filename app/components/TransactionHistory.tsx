@@ -1,5 +1,5 @@
 "use client"
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { LndClient, Transaction, TransactionType, TransactionStatus, ListTransactionHistoryResponse } from 'flndr';
 
 // Define filter state type
@@ -44,19 +44,35 @@ const TransactionHistory: React.FC = () => {
     limit: 10,
   });
 
-  // Build request options from filters and pagination
-  const buildRequestOptions = useCallback(() => {
+  // Use refs to store current values without causing re-renders
+  const filtersRef = useRef(filters);
+  const paginationRef = useRef(pagination);
+  
+  // Update refs when state changes
+  useEffect(() => {
+    filtersRef.current = filters;
+  }, [filters]);
+  
+  useEffect(() => {
+    paginationRef.current = pagination;
+  }, [pagination]);
+
+  // Function to build request options - now uses refs instead of state
+  const buildRequestOptions = useCallback((isReset: boolean, customPagination?: PaginationState) => {
+    const currentFilters = filtersRef.current;
+    const currentPagination = customPagination || paginationRef.current;
+    
     return {
-      offset: pagination.offset,
-      limit: pagination.limit,
-      payment_cursor: pagination.payment_cursor,
-      invoice_cursor: pagination.invoice_cursor,
-      types: filters.types || undefined,
-      statuses: filters.statuses || undefined,
-      creation_date_start: filters.startDate ? Math.floor(new Date(filters.startDate).getTime() / 1000).toString() : undefined,
-      creation_date_end: filters.endDate ? Math.floor(new Date(filters.endDate).getTime() / 1000).toString() : undefined,
+      offset: isReset ? 0 : currentPagination.offset,
+      limit: currentPagination.limit,
+      payment_cursor: isReset ? undefined : currentPagination.payment_cursor,
+      invoice_cursor: isReset ? undefined : currentPagination.invoice_cursor,
+      types: currentFilters.types || undefined,
+      statuses: currentFilters.statuses || undefined,
+      creation_date_start: currentFilters.startDate ? Math.floor(new Date(currentFilters.startDate).getTime() / 1000).toString() : undefined,
+      creation_date_end: currentFilters.endDate ? Math.floor(new Date(currentFilters.endDate).getTime() / 1000).toString() : undefined,
     };
-  }, [filters, pagination]);
+  }, []);
 
   // Function to fetch transactions with cursor-based pagination
   const fetchTransactions = useCallback(async (resetPagination = false) => {
@@ -64,21 +80,18 @@ const TransactionHistory: React.FC = () => {
       setLoading(true);
       setError(null);
       
-      // Create new pagination state based on whether we're resetting or continuing
-      const paginationState = resetPagination ? 
-        { offset: 0, limit: pagination.limit } : 
-        pagination;
-      
-      // Update pagination state if we're resetting
+      // If resetting pagination, update the pagination state first
       if (resetPagination) {
-        setPagination(paginationState);
+        setPagination(prev => ({
+          offset: 0,
+          limit: prev.limit,
+          payment_cursor: undefined,
+          invoice_cursor: undefined
+        }));
       }
       
-      // Build request options
-      const requestOptions = {
-        ...buildRequestOptions(),
-        ...(resetPagination ? { offset: 0, payment_cursor: undefined, invoice_cursor: undefined } : {})
-      };
+      // Build request options using the latest state through refs
+      const requestOptions = buildRequestOptions(resetPagination);
 
       const response = await lndClient.listTransactionHistory(requestOptions);
       
@@ -117,7 +130,7 @@ const TransactionHistory: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [lndClient, pagination, buildRequestOptions]);
+  }, [lndClient, buildRequestOptions]);
 
   // Initial load
   useEffect(() => {
@@ -190,7 +203,8 @@ const TransactionHistory: React.FC = () => {
       payment_cursor: undefined,
       invoice_cursor: undefined
     }));
-    fetchTransactions(true);
+    // Schedule fetchTransactions for next tick to ensure pagination state is updated
+    setTimeout(() => fetchTransactions(true), 0);
   }, [fetchTransactions]);
 
   // Available transaction types for filter
